@@ -18,16 +18,42 @@
 
 set -euo pipefail
 
-PY="${PYTHON:-python3}"
-echo "==> Using interpreter: $($PY --version 2>&1)"
+# --- locate a Python interpreter (TPU images vary; python3 may be absent) ---
+PY=""
+for c in "${PYTHON:-}" python3.12 python3.11 python3.10 python3 python; do
+  [ -n "$c" ] || continue
+  if command -v "$c" >/dev/null 2>&1; then PY="$(command -v "$c")"; break; fi
+done
+if [ -z "$PY" ]; then
+  echo "ERROR: no Python interpreter found on PATH."
+  echo "  Install one, then re-run:"
+  echo "    sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip"
+  exit 1
+fi
+echo "==> Using interpreter: $PY ($($PY --version 2>&1))"
 
-# Optional but recommended: isolated venv
+# --- ensure pip exists ---
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  echo "==> pip missing; attempting ensurepip bootstrap"
+  "$PY" -m ensurepip --upgrade 2>/dev/null || {
+    echo "  ensurepip unavailable — install with: sudo apt-get install -y python3-pip"
+    exit 1
+  }
+fi
+
+# --- optional isolated venv (degrade gracefully if the venv module is missing) ---
 if [ "${USE_VENV:-1}" = "1" ]; then
   echo "==> Creating virtualenv .venv"
-  "$PY" -m venv .venv
-  # shellcheck disable=SC1091
-  source .venv/bin/activate
-  PY=python
+  if "$PY" -m venv .venv 2>/dev/null; then
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+    PY="$(command -v python)"
+    echo "==> venv active: $PY"
+  else
+    echo "WARN: the 'venv' module is unavailable (common on fresh TPU images)."
+    echo "      Fix with:  sudo apt-get install -y python3-venv"
+    echo "      Continuing with the system interpreter (set USE_VENV=0 to silence)."
+  fi
 fi
 
 echo "==> Upgrading pip"

@@ -145,17 +145,35 @@ def test_small_integration():
     model = _tiny_gpt_oss()
     if model is None:
         return
-    fused = copy.deepcopy(model)
-    patch_gpt_oss_model(fused, device=torch.device("cpu"))
 
-    ids = torch.randint(0, model.config.vocab_size, (1, 16))
+    # gpt-oss MoE uses aten::_grouped_mm, which is NOT implemented on CPU
+    # (only CUDA / XLA). So this test needs the XLA device when present.
+    device = None
+    try:
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+    except Exception:
+        device = torch.device("cpu")
+    print(f"  device: {device}")
 
-    with torch.no_grad():
-        lo = model(input_ids=ids).logits
-        lf = fused(input_ids=ids).logits
+    fused = copy.deepcopy(model).to(device)
+    model = model.to(device)
+    patch_gpt_oss_model(fused, device=device)
+
+    ids = torch.randint(0, model.config.vocab_size, (1, 16)).to(device)
+
+    try:
+        with torch.no_grad():
+            lo = model(input_ids=ids).logits
+            lf = fused(input_ids=ids).logits
+    except NotImplementedError as e:
+        print("  SKIP: gpt-oss MoE needs the XLA/CUDA backend (aten::_grouped_mm "
+              f"unavailable on this device). Run on the TPU. [{e.__class__.__name__}]")
+        return
+
     max_diff = (lo.float() - lf.float()).abs().max().item()
     mean_diff = (lo.float() - lf.float()).abs().mean().item()
-    # FP32 model: matmul reassociation only -> very tight.
+    # FP32 model: matmul reassociation only -> should be very tight.
     status = "PASS" if max_diff < 1e-3 else "FAIL"
     print(f"  [{status}] logits: max={max_diff:.2e} mean={mean_diff:.2e}")
     assert max_diff < 1e-3, f"tiny integration logits diverged: {max_diff}"
@@ -163,7 +181,7 @@ def test_small_integration():
     with torch.no_grad():
         go = model.generate(ids, max_new_tokens=12, do_sample=False, use_cache=True)
         gf = fused.generate(ids, max_new_tokens=12, do_sample=False, use_cache=True)
-    match = torch.equal(go, gf)
+    match = torch.equal(go.cpu(), gf.cpu())
     print(f"  [{'PASS' if match else 'FAIL'}] greedy tokens identical: {match}")
     assert match, "tiny integration greedy tokens differ"
     print("  Small integration passed.\n")

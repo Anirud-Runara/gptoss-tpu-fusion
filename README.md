@@ -1,16 +1,21 @@
-# gptoss-tpu-fusion
+# gptoss-fusion
 
-**RMSNorm fusion for OpenAI's gpt-oss on TPU, measuring the inference speedup.**
+**RMSNorm + QKV fusion for OpenAI's gpt-oss — integrating a custom CUDA kernel into vLLM and measuring the speedup.**
 
 >  **Work in progress.**
 
 ## Goal
 
 Absorb the attention `input_layernorm` scale (γ) into a combined Q/K/V matmul for
-**gpt-oss**, run the model on **TPU v6e** via HuggingFace + PyTorch/XLA, and
-**benchmark the inference speedup** vs. the stock model. (Only the attention QKV
-site is fused — the MoE block is left untouched, since the router sits between
-the norm and the experts.)
+**gpt-oss**, plug a hand-tuned **V3 CUDA kernel** (fused RMSNorm + combined-QKV)
+into **vLLM** in place of its native `RMSNorm` + `QKVParallelLinear`, and
+**benchmark V3-fused vLLM vs. stock vLLM** on GPU. (Only the attention QKV site is
+fused — the MoE block is left untouched, since the router sits between the norm
+and the experts.)
+
+> Earlier exploration targeted gpt-oss on TPU (HuggingFace + PyTorch/XLA); that
+> code still lives under `backends/tpu/`. The current focus is the GPU + vLLM
+> integration under `backends/cuda/`.
 
 ## Plan — 4 steps
 
