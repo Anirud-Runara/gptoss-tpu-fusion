@@ -27,13 +27,20 @@ if _REPO_ROOT not in sys.path:
 # Keep the engine in-process so the class-level patch applies (TP=1 single GPU).
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
+# FlashInfer's sampler JIT needs CUDA >= 12.9 to build for Blackwell (sm_120);
+# on CUDA 12.8 it raises "SM 12.x requires CUDA >= 12.9". Fall back to vLLM's
+# native PyTorch sampler. (Our V3 kernel builds fine on 12.8.)
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="vLLM gpt-oss: stock vs V3 fused kernel")
     p.add_argument("--mode", choices=["stock", "v3", "v1"], default="stock")
     p.add_argument("--model", default="openai/gpt-oss-20b")
-    p.add_argument("--num-prompts", type=int, default=64)
-    p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--num-prompts", type=int, default=256)
+    p.add_argument("--max-tokens", type=int, default=256)
+    p.add_argument("--repeat", type=int, default=5, help="timed rounds (after warmup)")
+    p.add_argument("--warmup-rounds", type=int, default=2, help="full untimed passes")
     p.add_argument("--gpu-mem-util", type=float, default=0.90)
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--check", action="store_true", help="print a sample completion")
@@ -62,21 +69,29 @@ def main():
     prompts = [base + f"(variant {i})" for i in range(args.num_prompts)]
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_tokens)
 
-    # Warmup (also triggers the lazy V3 build + any compilation).
-    _ = llm.generate(prompts[: min(8, len(prompts))], sp, use_tqdm=False)
+    import statistics
 
-    t0 = time.perf_counter()
-    outs = llm.generate(prompts, sp, use_tqdm=False)
-    elapsed = time.perf_counter() - t0
+    # Warmup: full passes so Triton/inductor JIT + the lazy V3 build land OUTSIDE
+    # the timed region (the first run otherwise eats JIT-compilation spikes).
+    for _ in range(args.warmup_rounds):
+        _ = llm.generate(prompts, sp, use_tqdm=False)
+
+    times = []
+    for _ in range(args.repeat):
+        t0 = time.perf_counter()
+        outs = llm.generate(prompts, sp, use_tqdm=False)
+        times.append(time.perf_counter() - t0)
 
     n_out = sum(len(o.outputs[0].token_ids) for o in outs)
+    thr = [n_out / t for t in times]
+    mean, best = statistics.mean(thr), max(thr)
+    std = statistics.pstdev(thr) if len(thr) > 1 else 0.0
     print("\n==== RESULT ====")
     print(f"mode            : {args.mode}")
-    print(f"prompts         : {len(prompts)}")
-    print(f"output tokens   : {n_out}")
-    print(f"elapsed         : {elapsed:.3f}s")
-    print(f"throughput      : {n_out / elapsed:.1f} tok/s")
-    print(f"latency/req     : {elapsed / len(prompts) * 1e3:.1f} ms (batched)")
+    print(f"prompts x toks  : {len(prompts)} x {args.max_tokens}  ({n_out} out tokens)")
+    print(f"rounds          : {args.repeat}  per-round s = {['%.3f' % t for t in times]}")
+    print(f"throughput      : mean {mean:.1f} ± {std:.1f} tok/s   |   best {best:.1f} tok/s")
+    print(f"latency/req     : best {min(times) / len(prompts) * 1e3:.2f} ms (batched)")
     if args.check:
         print(f"\nsample output   : {outs[0].outputs[0].text[:300]!r}")
 
