@@ -44,6 +44,8 @@ def parse_args():
     p.add_argument("--gpu-mem-util", type=float, default=0.90)
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--check", action="store_true", help="print a sample completion")
+    p.add_argument("--csv", default=None,
+                   help="append results here (default: benchmarks/results/vllm_bench.csv)")
     return p.parse_args()
 
 
@@ -94,6 +96,24 @@ def main():
     print(f"latency/req     : best {min(times) / len(prompts) * 1e3:.2f} ms (batched)")
     if args.check:
         print(f"\nsample output   : {outs[0].outputs[0].text[:300]!r}")
+
+    # Persist a row so runs accumulate (the result is otherwise only on stdout).
+    import csv
+    import datetime
+    csv_path = args.csv or os.path.join(_REPO_ROOT, "benchmarks", "results", "vllm_bench.csv")
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    is_new = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if is_new:
+            w.writerow(["timestamp", "mode", "model", "num_prompts", "max_tokens", "repeat",
+                        "mean_tok_s", "std_tok_s", "best_tok_s", "best_latency_ms", "per_round_s"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), args.mode, args.model,
+                    len(prompts), args.max_tokens, args.repeat,
+                    f"{mean:.1f}", f"{std:.1f}", f"{best:.1f}",
+                    f"{min(times) / len(prompts) * 1e3:.2f}",
+                    ";".join(f"{t:.3f}" for t in times)])
+    print(f"appended results -> {csv_path}")
 
 
 if __name__ == "__main__":

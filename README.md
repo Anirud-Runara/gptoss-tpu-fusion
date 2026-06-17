@@ -17,6 +17,14 @@ and the experts.)
 > code still lives under `backends/tpu/`. The current focus is the GPU + vLLM
 > integration under `backends/cuda/`.
 
+## Results
+
+See [`RESULTS.md`](RESULTS.md). Headline: on vLLM 0.23.0 / Blackwell, the V3 fused
+kernel is **~4% slower** than vLLM's native `fused_add_rms_norm` + `QKVParallelLinear`
+— vLLM already fuses the residual-add that V3 must do separately, and the norm is too
+small a fraction to overcome it. Outputs are numerically identical. Raw numbers in
+[`benchmarks/results/vllm_bench.csv`](benchmarks/results/vllm_bench.csv).
+
 ## Plan — 4 steps
 
 1. **Baseline** — load stock gpt-oss-20b on TPU, benchmark latency / throughput.
