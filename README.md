@@ -25,34 +25,57 @@ kernel is **~4% slower** than vLLM's native `fused_add_rms_norm` + `QKVParallelL
 small a fraction to overcome it. Outputs are numerically identical. Raw numbers in
 [`benchmarks/results/vllm_bench.csv`](benchmarks/results/vllm_bench.csv).
 
-## Plan — 4 steps
+## What This Repo Does
 
-1. **Baseline** — load stock gpt-oss-20b on TPU, benchmark latency / throughput.
-2. **Fusion** — apply the offline fusion + runtime patch (skip `input_layernorm`,
-   combined QKV matmul), verify numerical parity, benchmark the delta vs. Step 1.
-3. **Inference engine** — load the stock model under vLLM-TPU, benchmark.
-4. **Fusion + engine** — fused model under vLLM-TPU, benchmark.
+This repo benchmarks a custom V3 CUDA kernel against vLLM's native gpt-oss
+layernorm/QKV path.
 
-Current focus: **Steps 1–2** (the HuggingFace path). vLLM integration comes later.
+The benchmark compares:
+
+- `stock`: vLLM's native `input_layernorm` + `QKVParallelLinear`
+- `v3`: a monkey-patched vLLM path that routes `input_layernorm + QKV` through
+  the custom V3 fused RMSNorm + combined-QKV CUDA kernel
+- `v1`: an older fused-kernel variant kept for comparison
+
+Only the attention input layernorm and QKV projection are changed. The attention
+backend, output projection, post-attention layernorm, and MoE block remain
+vLLM-native.
 
 ## Layout
 
 ```
-core/weight_transform.py        # fusion math: transform_gpt_oss_layer()
-backends/tpu/patch_gpt_oss.py   # runtime XLA monkey-patch (Step 2 algorithm)
-scripts/fuse_gpt_oss.py         # offline fuse + save + push-to-hub
-scripts/install_deps.sh         # TPU VM dependency install
-PLAN.md                         # detailed plan & rationale
+benchmarks/bench_vllm_v3.py          # stock vs V3 benchmark entry point
+backends/vllm/patch_vllm_gpt_oss.py  # vLLM monkey-patch for gpt-oss blocks
+backends/cuda/fused_forward.py       # V1/V3 fused RMSNorm + combined-QKV modules
+csrc/denominator_kernel.cu           # custom CUDA RMSNorm denominator kernels
+csrc/denominator.cpp                 # PyTorch CUDA extension bindings
+benchmarks/results/vllm_bench.csv    # accumulated benchmark results
+RESULTS.md                           # measured results and interpretation
 ```
 
-## Quick start (on a TPU v6e VM)
+Older TPU/HuggingFace exploration still exists under `backends/tpu/` and related
+scripts, but it is not the current benchmark path.
+
+## Running the Benchmark
+
+Install dependencies, then run each mode in a separate process because the vLLM
+patch is global:
 
 ```bash
-bash scripts/install_deps.sh
-huggingface-cli login
-python scripts/fuse_gpt_oss.py --model-id openai/gpt-oss-20b \
-    --output-dir gpt-oss-20b-fused-bf16
+python benchmarks/bench_vllm_v3.py --mode stock --model openai/gpt-oss-20b
+python benchmarks/bench_vllm_v3.py --mode v3 --model openai/gpt-oss-20b
 ```
 
-See [`PLAN.md`](PLAN.md) for the full rationale (including why the TPU speedup is
-expected to be modest — XLA already fuses much of what a custom kernel would on GPU).
+For an explicit CUDA extension build, you can set the target architecture:
+
+```bash
+GPTOSS_CUDA_ARCH=sm_80 pip install -e .
+```
+
+The benchmark script also JIT-builds the extension on first import if needed.
+
+## Current Result
+
+See [`RESULTS.md`](RESULTS.md). On vLLM 0.23.0 / Blackwell, the custom V3 kernel is
+about 4% slower than vLLM's native path. The outputs match, but vLLM already fuses
+residual-add + RMSNorm, while the V3 path has to perform the residual add separately.
