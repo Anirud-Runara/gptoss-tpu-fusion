@@ -2,7 +2,6 @@
 
 **RMSNorm + QKV fusion for OpenAI's gpt-oss — integrating a custom CUDA kernel into vLLM and measuring the speedup.**
 
->  **Work in progress.**
 
 ## Goal
 
